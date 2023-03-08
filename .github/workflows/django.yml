@@ -1,23 +1,51 @@
 name: Django CI
-
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
 jobs:
-  build:
+  build-push-gcr:
+    name: Build and Push to GCP
     runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 4
-      matrix:
-        python-version: [3.10.9]
+    env:
+      IMAGE_NAME: ${{ secrets.IMAGE_NAME  }}
+      PROJECT_ID: ${{ secrets.PROJECT_ID  }}
+      GCLOUD_SERVICE_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY  }}
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v3
+    - name: Checkout
+      uses: actions/checkout@v2
+
+    - uses:  google-github-actions/setup-gcloud@94337306dda8180d967a56932ceb4ddcf01edae7
       with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install Dependencies
+        service_account_key: ${{ secrets.SERVICE_ACCOUNT_KEY }}
+        project_id: ${{ env.PROJECT_ID }}
+        export_default_credentials: true
+    
+    - uses: google-github-actions/get-gke-credentials@fb08709ba27618c31c09e014e1d8364b02e5042e
+      with:
+        cluster_name: ${{ secrets.GKE_CLUSTER_NAME }}
+        location: ${{ secrets.GKE_ZONE }}
+        credentials: ${{ secrets.SERVICE_ACCOUNT_KEY }}
+
+    - name: Build Docker Image
+      run: docker build -t $IMAGE_NAME:latest ./blogapp/
+
+    - name: Set the new Docker Image Tag
+      id: step_one
       run: |
-        python -m venv ./env
-        source env/bin/activate
-        pip install -r requirements.txt
+        echo "FOO=$(bash ./scripts/git_update.sh)" >> $GITHUB_ENV
+    - name: Configure Docker Client
+      run: |-
+        echo "$GCLOUD_SERVICE_KEY" > ${HOME}/.docker/gcloud-service-key.json
+        gcloud auth activate-service-account --key-file ${HOME}/.docker/gcloud-service-key.json
+        gcloud auth configure-docker
+  
+    - name: Push Docker Image to Container Registry (GCR)
+      env:
+        GIT_TAG: "${{ env.FOO }}"
+      run: |-
+        docker tag $IMAGE_NAME:latest gcr.io/$PROJECT_ID/$IMAGE_NAME:latest
+        docker tag $IMAGE_NAME:latest gcr.io/$PROJECT_ID/$IMAGE_NAME:$GIT_TAG
+        docker push gcr.io/$PROJECT_ID/$IMAGE_NAME:latest
+        docker push gcr.io/$PROJECT_ID/$IMAGE_NAME:$GIT_TAG
+        kubectl config set-context --current --namespace=django-blogapp
+        kubectl set image deployment/webappdeployment melihselamiurkmez/blogapp:v2=gcr.io/eternal-wonder-376414/blogapp:$GIT_TAG
